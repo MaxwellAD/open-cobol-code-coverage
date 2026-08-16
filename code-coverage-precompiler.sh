@@ -37,7 +37,7 @@ cobol_wrap_display() {
     if [[ "$input_line" =~ DISPLAY[[:space:]]+\'([^\']*)\' ]] || \
        [[ "$input_line" =~ DISPLAY[[:space:]]+\"([^\"]*)\" ]]; then
         
-
+        
         # 2. Extract the prefix (e.g., "            DISPLAY ")
         local prefix="${input_line%%$q_char*}"
         
@@ -85,6 +85,7 @@ cobol_wrap_display() {
         done
     fi
 }
+
 
 if [[ -z "$SOURCE_FILE" || -z "$OUTPUT_FILE" ]]; then
     echo "Usage: $0 <source_file> <output_file>"
@@ -135,7 +136,7 @@ HEADER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"**********************
 DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
 
 # Define keywords that trigger a coverage check - expand as needed
-EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY|PERFORM|CALL|GOBACK|STRING|INSPECT|UNSTRING|ACCEPT|DIVIDE|MULTIPLY|SUBTRACT|SET)"
+EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY|PERFORM|CALL|GOBACK|STRING|INSPECT|UNSTRING|ACCEPT|DIVIDE|MULTIPLY|SUBTRACT|SET|OPEN|CLOSE|CONTINUE)"
 # Control statements that precede an exit or jump
 CONTROL_KEYWORDS="STOP[[:space:]]*RUN|GO[[:space:]]*BACK"
 
@@ -225,7 +226,7 @@ for (( i=0; i<$PROCEDURE_DIVISION_INDEX; i++ )); do
     LINE="${SOURCE_FILE_LINES[$i]}"
     if [[ "$LINE" == *"WORKING-STORAGE SECTION."* ]]; then
         # Replace the standard header with the one containing the dynamic count
-        FINAL_OUTPUT+="${AREA_A_INDENT} WORKING-STORAGE SECTION.\n"
+        FINAL_OUTPUT+="${AREA_A_INDENT}WORKING-STORAGE SECTION.\n"
         FINAL_OUTPUT+="${AREA_A_INDENT} 01 COV-FLAGS OCCURS $COVERAGE_INDEX TIMES PIC 9(1) VALUE 0.\n"
         FINAL_OUTPUT+="${AREA_A_INDENT} 01 COV-STATS.\n"
         FINAL_OUTPUT+="${AREA_A_INDENT}   05 TOTAL-STMT       PIC 9(4) VALUE $COVERAGE_INDEX.\n"
