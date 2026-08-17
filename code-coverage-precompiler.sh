@@ -22,6 +22,34 @@ OUTPUT_FILE=$2
 AREA_A_INDENT="       "
 AREA_B_INDENT="            "
 
+# Given content that may contain doubled-quote escape pairs (a literal
+# occurrence of q_char, represented as q_char repeated twice), return a split
+# length <= max_len that never falls between the two characters of a pair -
+# doing so would close the wrapped literal one character early.
+cobol_safe_split_len() {
+    local content="$1"
+    local len="$2"
+    local q="$3"
+
+    if (( len > ${#content} )); then
+        len=${#content}
+    fi
+
+    while (( len > 0 && len < ${#content} )); do
+        if [[ "${content:$((len-1)):1}" == "$q" && "${content:$len:1}" == "$q" ]]; then
+            ((len--))
+        else
+            break
+        fi
+    done
+
+    # Guard against a run of quote characters long enough to shrink the
+    # split point to nothing - fall back to len 1 so the loop still progresses.
+    (( len == 0 && ${#content} > 0 )) && len=1
+
+    echo "$len"
+}
+
 # Used when trying to write long dislplay lines
 cobol_wrap_display() {
     local input_line="$1"
@@ -33,14 +61,14 @@ cobol_wrap_display() {
         return
     fi
 
-    # Check if the line is a DISPLAY statement containing quotes
-    if [[ "$input_line" =~ DISPLAY[[:space:]]+\'([^\']*)\' ]] || \
-       [[ "$input_line" =~ DISPLAY[[:space:]]+\"([^\"]*)\" ]]; then
-        
-        
+    # Check if this line is a DISPLAY statement WITH QUOTES (i.e not a WS-VAR)
+    # DISPLAY 'example' needs careful processing because that eventually becomes DISPLAY ' DISPLAY 'example''' <-- simplified but you get the point
+    local after_open_quote="${input_line#*$q_char}"
+    if [[ "$input_line" == *"DISPLAY"* ]] && [[ "$after_open_quote" == *"$q_char"* ]]; then
+
         # 2. Extract the prefix (e.g., "            DISPLAY ")
         local prefix="${input_line%%$q_char*}"
-        
+
         # 3. Extract the literal text inside the quotes
         local literal_content="${input_line#*$q_char}"
         literal_content="${literal_content%$q_char*}"
@@ -51,9 +79,11 @@ cobol_wrap_display() {
         # Safe splitting size for the first line to leave room for the closing quote and " &"
         # 72 max - prefix length - 4 characters for [quote + space + ampersand + space]
         local first_chunk_max=$((72 - ${#prefix} - 4))
-        
-        local first_chunk="${literal_content:0:$first_chunk_max}"
-        local remaining="${literal_content:$first_chunk_max}"
+        local first_len
+        first_len=$(cobol_safe_split_len "$literal_content" "$first_chunk_max" "$q_char")
+
+        local first_chunk="${literal_content:0:$first_len}"
+        local remaining="${literal_content:$first_len}"
 
         # Output the first line properly closed and concatenated with &
         echo "${prefix}${q_char}${first_chunk}${q_char} &"
@@ -63,15 +93,17 @@ cobol_wrap_display() {
             # Max text size per intermediate line: 54 characters
             # (Allows 12 spaces of Area B indentation + quote + text + quote + " &")
             local chunk_size=54
-            
+
             # If it's the last chunk, wrap it up with the final suffix period
             if [[ ${#remaining} -le $chunk_size ]]; then
                 printf "            %s%s%s%s\n" "${q_char}" "${remaining}" "${q_char}" "${suffix}"
                 remaining=""
             else
-                local chunk="${remaining:0:$chunk_size}"
+                local safe_len
+                safe_len=$(cobol_safe_split_len "$remaining" "$chunk_size" "$q_char")
+                local chunk="${remaining:0:$safe_len}"
                 printf "            %s%s%s &\n" "${q_char}" "${chunk}" "${q_char}"
-                remaining="${remaining:$chunk_size}"
+                remaining="${remaining:$safe_len}"
             fi
         done
     else
@@ -85,7 +117,6 @@ cobol_wrap_display() {
         done
     fi
 }
-
 
 if [[ -z "$SOURCE_FILE" || -z "$OUTPUT_FILE" ]]; then
     echo "Usage: $0 <source_file> <output_file>"
@@ -145,8 +176,12 @@ for (( i=$PROCEDURE_DIVISION_INDEX; i<${#SOURCE_FILE_LINES[@]}; i++ )); do
     # Determine the appropriate quote character based on the original line content.
     # If the line contains double quotes, use single quotes for wrapping to avoid conflicts.
     # Otherwise, default to double quotes.
-    q_char="\"" 
+    q_char="\""
     [[ "$LINE" == *'"'* ]] && q_char="'"
+
+    # COBOL escapes quotes by using the same quote twice
+    # If the quote char is there, replace it with the same char twice
+    ESCAPED_LINE="${LINE//$q_char/$q_char$q_char}"
 
     # If the line contains an executable verb or a control verb
     if [[ "$LINE" =~ ($EXECUTABLE_KEYWORDS) ]] || [[ "$LINE" =~ ($CONTROL_KEYWORDS) ]]; then
@@ -165,15 +200,15 @@ for (( i=$PROCEDURE_DIVISION_INDEX; i<${#SOURCE_FILE_LINES[@]}; i++ )); do
 
         # Build the corresponding entry in the coverage report section
         DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} IF COV-FLAGS($COVERAGE_INDEX) = \"1\"\n"
-        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}[+] $LINE${q_char}\n" "${q_char}")
+        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}[+] $ESCAPED_LINE${q_char}\n" "${q_char}")
         DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} ELSE\n"
-        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}[-] $LINE${q_char}\n" "${q_char}")
+        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}[-] $ESCAPED_LINE${q_char}\n" "${q_char}")
         DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} END-IF\n"
 
     else
         # If not an executable line (e.g., comment or label), just pass it through to both 
         MODIFIED_PROCEDURE_DIVISION_LINES+="$LINE\n"
-        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}    ${LINE}${q_char}\n" "${q_char}")
+        DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT}     DISPLAY ${q_char}    ${ESCAPED_LINE}${q_char}\n" "${q_char}")
     fi
 done  
 
