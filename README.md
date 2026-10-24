@@ -5,10 +5,12 @@ Free and open source COBOL Code Coverage library
 ## How to use
 
 ``` bash
-./cobol-code-coverage.sh <source file> <output file>
+./code-coverage-precompiler.sh <source file> <output file>
 ```
 
 The script reads the source file and builds the output file as a mirror with code coverage logic instrumented, which can be then passed onto a compiler of your choosing, I have been using GNU COBOL to test.
+
+It also writes a second program next to the output file, `<PROGRAM-ID>-combine.cbl`, which merges the coverage of many runs into one report - see [Combining Coverage Across Runs](#combining-coverage-across-runs).
 
 ## Example
 
@@ -77,9 +79,10 @@ Result: 00012
 ****************************************************************************************
     SUMMARY STATISTICS                           
 ****************************************************************************************
-    TOTAL STATEMENTS: 0019
-    COVERED STATEMENTS: 0015
+    TOTAL STATEMENTS: 19
+    COVERED STATEMENTS: 15
     STATEMENT COVERAGE: 078.94%
+*COV* 0750898251 01 1111111111111100001
 ****************************************************************************************
     END OF REPORT - CALC                                            
 ****************************************************************************************
@@ -139,12 +142,60 @@ Result: 00000
 ****************************************************************************************
     SUMMARY STATISTICS                           
 ****************************************************************************************
-    TOTAL STATEMENTS: 0019
-    COVERED STATEMENTS: 0015
+    TOTAL STATEMENTS: 19
+    COVERED STATEMENTS: 15
     STATEMENT COVERAGE: 078.94%
+*COV* 0750898251 01 1111111111111000011
 ****************************************************************************************
     END OF REPORT - CALC                                            
 ****************************************************************************************
+```
+
+## Combining Coverage Across Runs
+
+A single run rarely exercises every path, so each report also ends with one or more `*COV*` lines - the raw coverage data for that run:
+
+```
+*COV* 0750898251 01 1111111111111100001
+      |          |  |
+      |          |  flags, one per instrumented statement (1 = executed)
+      |          offset of the first flag on this line
+      fingerprint of the instrumented program
+```
+
+The generated combine program reads captured output from any number of runs, ORs the flags together (a statement is covered if *any* run executed it) and prints the usual report for the whole set. Any other lines in the input are ignored, so a job's SYSOUT, a unit test report or pasted terminal output can be fed in as is.
+
+``` bash
+cobc -x CALC-combine.cbl -o calc-combine
+CALCCOV=<(cat run1.txt run2.txt) ./calc-combine
+```
+
+The combine program reads the file named by `<PROGRAM-ID>COV`, much like a DD statement. Combining the two CALC runs above (one `ADD`, one invalid operator) covers both branches:
+
+```
+                   WHEN 'DIV'
+[-]                    COMPUTE RESULT = NUM1 / NUM2
+                   WHEN OTHER 
+[+]                    DISPLAY 'THE OPERATOR WAS NOT VALID'
+               END-EVALUATE
+...
+    TOTAL STATEMENTS: 19
+    COVERED STATEMENTS: 16
+    STATEMENT COVERAGE: 084.21%
+...
+    RUNS MERGED: 000000002
+    COVERAGE LINES MERGED: 000000002
+    COVERAGE LINES SKIPPED (STALE OR MALFORMED): 000000000
+    INPUT LINES POSSIBLY TRUNCATED: 000000000
+```
+
+Things worth knowing:
+- **Stale data is rejected.** The fingerprint changes whenever the source (or which statements get instrumented) changes, so output from an older version of the program is counted as skipped rather than merged into the wrong statements.
+- **The data goes to DISPLAY, not a file.** That keeps the instrumented program free of file I/O, so it works anywhere DISPLAY does - only the combine program needs to read a file.
+- **Line widths can be set.** `COVERAGE_OUTPUT_WIDTH` (default 80) is the widest `*COV*` line the instrumented program writes - set it to the record length of wherever the output lands, so lines are never split. `COVERAGE_INPUT_WIDTH` (default 4096) is the widest line the combine program reads; lines that fill it are reported as possibly truncated.
+
+``` bash
+COVERAGE_OUTPUT_WIDTH=133 ./code-coverage-precompiler.sh <source file> <output file>
 ```
 
 ## How It Works
@@ -184,6 +235,7 @@ Result: 00000
              END-IF
 ```
 1. Once at the end of the source file, add the required working storage flags and append the DISPLAY-COVERAGE SECTION to the end of the procedure division
+1. The DISPLAY-COVERAGE SECTION finishes by displaying the flags themselves as `*COV*` lines, and the same report section is reused in a bespoke combine program that reads those lines back in from many runs
 
 
 ## Why
@@ -207,16 +259,6 @@ Currently the script looks for a `GO BACK` or `STOP RUN` for the moment to displ
 
 ### Clearing Coverage Statistics
 The ability to reset the coverage statistics mid flight may be useful if there's some highly reusable code that you want to evidence in a specific context that only appears deep in some business logic
-
-### Combining Coverage Statistics
-If you are using this to test a bigger COBOL program, chances are you aren't hitting all of your cases in a single instance of the code. You'll need to combine the coverage of multiple runs to get the true number of verbs covered by your testing session
-
-In theory this can be as simple as:
-- appending the COV-FLAGS array to a file
-- Each execution adds a new record of COV-FLAGS
-- Run an OR against every column to get the overall value
-- Or SUM every column and all flags greater than zero are covered
-- This can easily get you the summary statistics, however re-translating that back into a visual PROCEDURE DIVISION recreation will need some work
 
 ### Branch Coverage Logic
 Verbs are either executed or unexecuted, however conditions can be partially executed, e.g the IF but not the ELSE, or not all branches of an EVALUATE, or not even every permutation that satisfies the IF
