@@ -29,8 +29,8 @@ AREA_B_INDENT="            "
 #   never split: 80 suits an FB80 PDS member, SYSOUT is often 121/133, POSIX
 #   files and VB datasets can take far more. The flags per line are derived.
 # COVERAGE_INPUT_WIDTH - the widest line the combine program reads. Kept
-#   separate and generous, as captured lines may gain a prefix (e.g. CICS
-#   transient data); lines that fill it are reported as possibly truncated.
+#   separate and generous, as captured lines may gain a prefix by the system.
+# lines that fill it are reported as possibly truncated.
 COVERAGE_OUTPUT_WIDTH="${COVERAGE_OUTPUT_WIDTH:-80}"
 COVERAGE_INPUT_WIDTH="${COVERAGE_INPUT_WIDTH:-4096}"
 for setting in COVERAGE_OUTPUT_WIDTH COVERAGE_INPUT_WIDTH; do
@@ -313,9 +313,12 @@ FINAL_OUTPUT=""
 # can be too small to hold its values. COBOL never fails on an oversized value
 # - it silently keeps the low-order digits - so sizing is the only defence.
 # The widest value any of them holds is the *COV* pointer, which finishes one
-# past the last flag. The offset width therefore varies by program (and could
-# change between precompiler versions), which is why the combine program
-# splits *COV* lines on spaces rather than reading fixed positions.
+# past the last flag. The combine program splits *COV* lines on spaces rather
+# than reading fixed positions so it can still merge output from an earlier
+# precompiler version with the same mapping fingerprint, whose offset width may
+# differ - read at fixed positions, such a line could put its flags against the
+# wrong statements. (Lines from other programs are rejected on their
+# fingerprint, which is always the first field after the marker.)
 COVERAGE_MAX_COUNT=$((COVERAGE_INDEX + 1))
 COVERAGE_COUNT_DIGITS=${#COVERAGE_MAX_COUNT}
 
