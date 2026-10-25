@@ -167,10 +167,10 @@ The generated combine program reads captured output from any number of runs, ORs
 
 ``` bash
 cobc -x CALC-combine.cbl -o calc-combine
-CALCCOV=<(cat run1.txt run2.txt) ./calc-combine
+COVIN=<(cat run1.txt run2.txt) ./calc-combine
 ```
 
-The combine program reads the file named by `<PROGRAM-ID>COV`, much like a DD statement. Combining the two CALC runs above (one `ADD`, one invalid operator) covers both branches:
+The combine program reads `COVIN` - a DD name in JCL, or on UNIX/Linux an environment variable naming the file. Combining the two CALC runs above (one `ADD`, one invalid operator) covers both branches:
 
 ```
                    WHEN 'DIV'
@@ -185,7 +185,7 @@ The combine program reads the file named by `<PROGRAM-ID>COV`, much like a DD st
 ...
     RUNS MERGED: 000000002
     COVERAGE LINES MERGED: 000000002
-    COVERAGE LINES SKIPPED (STALE OR MALFORMED): 000000000
+    COVERAGE LINES SKIPPED (OTHER PROGRAM, STALE OR MALFORMED): 000000000
     INPUT LINES POSSIBLY TRUNCATED: 000000000
 ```
 

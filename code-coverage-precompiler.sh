@@ -179,13 +179,14 @@ PROGRAM_NAME=$(sed -nE 's/^.{6}[^*]PROGRAM-ID\.[[:space:]]*(.*)\..*/\1/p' "$SOUR
 if [[ -z "$PROGRAM_NAME" ]]; then PROGRAM_NAME="UNKNOWN"; fi
 
 # Per-program names, so instrumenting several programs side by side never collides.
-# The coverage file's external name has no hyphens or quotes so that it can be
-# redirected with an environment variable (e.g. DD_NOTNCROSCOV=/path/to/file),
-# much like a DD statement in JCL. It defaults to a file of that name in the
-# current directory.
 PROGRAM_NAME_CLEAN="${PROGRAM_NAME//[^A-Za-z0-9]/}"
-COVERAGE_FILE_NAME="${PROGRAM_NAME_CLEAN}COV"
-COMBINE_PROGRAM_ID="${PROGRAM_NAME_CLEAN}CC"
+# The combine program's input is the same name for every program: a valid
+# (8 characters or fewer) DD name in JCL, and on UNIX an environment variable
+# (COVIN=/path/to/file, or DD_COVIN) - set per run, so it never needs to differ
+# between programs.
+COVERAGE_FILE_NAME="COVIN"
+# The same for every program: 8 characters or fewer.
+COMBINE_PROGRAM_ID="COVCOMB"
 COMBINE_OUTPUT_FILE="$(dirname "$OUTPUT_FILE")/${PROGRAM_NAME_CLEAN}-combine.cbl"
 HEADER_1=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"')
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERAGE REPORT - $PROGRAM_NAME                                            \"" '"')
@@ -267,7 +268,9 @@ DISPLAY_COVERAGE_SECTION_LINES+="$FOOTER_1$FOOTER_2$FOOTER_3\n"
 # Display calculated output
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    TOTAL STATEMENTS: \" TOTAL-STMT\n" '"')
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERED STATEMENTS: \", COVERED-STMT\n" '"')
-DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    STATEMENT COVERAGE: \", PERCENT-CALC \"%\"\n" '"')
+# Displayed through an edited field - PERCENT-CALC's V is an implied decimal
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} MOVE PERCENT-CALC TO PERCENT-DISPLAY\n"
+DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    STATEMENT COVERAGE: \", PERCENT-DISPLAY \"%\"\n" '"')
 
 # Raw coverage data, for the combine program to merge across runs. Each line
 # is self-contained: *COV* <fingerprint> <offset of first flag> <chunk of flags>
@@ -361,6 +364,7 @@ COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-STATS.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 TOTAL-STMT       PIC 9(${COVERAGE_COUNT_DIGITS}) VALUE $COVERAGE_INDEX.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COVERED-STMT     PIC 9(${COVERAGE_COUNT_DIGITS}) VALUE 0.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 PERCENT-CALC     PIC 9(3)V99 VALUE 0.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 PERCENT-DISPLAY  PIC 999.99.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-FLAGS-COUNTER PIC 9(9) COMP VALUE 1.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-RAW-DATA.\n"
 COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-FINGERPRINT  PIC X(10) VALUE \"${COVERAGE_FINGERPRINT}\".\n"
@@ -402,11 +406,14 @@ COMBINE_COVERAGE_LINES+="\n"
 COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}ENVIRONMENT DIVISION.\n"
 COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}INPUT-OUTPUT SECTION.\n"
 COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}FILE-CONTROL.\n"
-# The ASSIGN name must be a quoted literal. An unquoted, undeclared word makes
-# GnuCOBOL 3.1.2 create an implicit data item whose descriptor is a reused
-# temporary - later statements can overwrite it, so the file is opened under
-# whatever that temporary last held (seen as a file literally named "1").
-COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}SELECT OPTIONAL COV-IN-FILE ASSIGN TO \"${COVERAGE_FILE_NAME}\"\n"
+# Unquoted, so it is a DD name under IBM rules. Caution for GnuCOBOL: in its
+# default dialect an unquoted ASSIGN word becomes an implicit data item whose
+# descriptor is a reused temporary, so any statement that reuses it BEFORE the
+# OPEN changes the filename (seen as a file literally named "1"). The OPEN is
+# therefore the first statement of the program - KEEP THIS UNTIL THIS BUG IS FIXED IN GNUCOBOL.
+# (Compiling with -std=ibm or -fassign-clause=external avoids the implicit item entirely.)
+# However this breaks the BYO compiler rule
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}SELECT OPTIONAL COV-IN-FILE ASSIGN TO ${COVERAGE_FILE_NAME}\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}ORGANIZATION IS LINE SEQUENTIAL\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}FILE STATUS IS COV-IN-STATUS.\n"
 COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}DATA DIVISION.\n"
@@ -447,11 +454,12 @@ COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-IF\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}PERFORM READ-LOOP UNTIL END-OF-FILE\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}CLOSE COV-IN-FILE\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}PERFORM DISPLAY-COVERAGE\n"
-COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"    RUNS MERGED: \" COV-RUNS-MERGED\n"
-COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"    COVERAGE LINES MERGED: \" COV-LINES-MERGED\n"
-COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"    COVERAGE LINES SKIPPED (STALE OR MALFORMED): \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"RUNS MERGED: \" COV-RUNS-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"COVERAGE LINES MERGED: \" COV-LINES-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"COVERAGE LINES SKIPPED \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    \"(OTHER PROGRAM, STALE OR MALFORMED): \"\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    COV-LINES-SKIPPED\n"
-COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"    INPUT LINES POSSIBLY TRUNCATED: \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"INPUT LINES POSSIBLY TRUNCATED: \"\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    COV-LINES-TRUNCATED\n"
 COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}IF COV-LINES-TRUNCATED > 0\n"
 COMBINE_COVERAGE_LINES+="$(cobol_wrap_display "${AREA_B_INDENT}    DISPLAY \"    (LINES FILLED ALL ${COVERAGE_INPUT_WIDTH} COLUMNS - RAISE COVERAGE_INPUT_WIDTH)\"" '"')\n"
