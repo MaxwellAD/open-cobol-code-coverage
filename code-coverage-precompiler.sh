@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Copyright (C) 2026 MaxwellAD
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 MaxwellAD
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
