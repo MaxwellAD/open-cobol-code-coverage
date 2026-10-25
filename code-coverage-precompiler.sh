@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Copyright (C) 2026 MaxwellAD
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 MaxwellAD
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -167,7 +168,7 @@ HEADER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"**********************
 DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
 
 # Define keywords that trigger a coverage check - expand as needed
-EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY|PERFORM|CALL|GOBACK|STRING|INSPECT|UNSTRING|ACCEPT|DIVIDE|MULTIPLY|SUBTRACT|SET|OPEN|CLOSE|CONTINUE)"
+EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE*|ADD*|COMPUTE*|DISPLAY*|PERFORM*|CALL*|GOBACK*|STRING*|INSPECT*|UNSTRING*|ACCEPT*|DIVIDE*|MULTIPLY*|SUBTRACT*|SET*|OPEN*|CLOSE*|CONTINUE*|WRITE*|GO*)"
 # Control statements that precede an exit or jump
 CONTROL_KEYWORDS="STOP[[:space:]]*RUN|GO[[:space:]]*BACK"
 
