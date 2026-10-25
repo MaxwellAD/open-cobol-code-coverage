@@ -1,5 +1,10 @@
 # Open COBOL Code Coverage
 
+<!--
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 MaxwellAD
+-->
+
 Free and open source COBOL Code Coverage library
 
 ## How to use
