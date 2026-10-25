@@ -22,6 +22,24 @@ OUTPUT_FILE=$2
 AREA_A_INDENT="       "
 AREA_B_INDENT="            "
 
+# Widths of the raw coverage data, overridable from the environment, e.g.
+#   COVERAGE_OUTPUT_WIDTH=133 code-coverage-precompiler.sh in.cbl out.cbl
+# COVERAGE_OUTPUT_WIDTH - the widest *COV* line the instrumented program writes.
+#   Set it to the record length of wherever the output lands, so a line is
+#   never split: 80 suits an FB80 PDS member, SYSOUT is often 121/133, POSIX
+#   files and VB datasets can take far more. The flags per line are derived.
+# COVERAGE_INPUT_WIDTH - the widest line the combine program reads. Kept
+#   separate and generous, as captured lines may gain a prefix by the system.
+# lines that fill it are reported as possibly truncated.
+COVERAGE_OUTPUT_WIDTH="${COVERAGE_OUTPUT_WIDTH:-80}"
+COVERAGE_INPUT_WIDTH="${COVERAGE_INPUT_WIDTH:-4096}"
+for setting in COVERAGE_OUTPUT_WIDTH COVERAGE_INPUT_WIDTH; do
+    if [[ ! "${!setting}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: $setting must be a positive whole number, got '${!setting}'" >&2
+        exit 1
+    fi
+done
+
 # Given content that may contain doubled-quote escape pairs (a literal
 # occurrence of q_char, represented as q_char repeated twice), return a split
 # length <= max_len that never falls between the two characters of a pair -
@@ -118,6 +136,12 @@ cobol_wrap_display() {
     fi
 }
 
+# True if the line is code (column 7 is not a comment indicator) and
+# contains the given text
+cobol_code_line_has() {
+    [[ "$1" =~ ^.{6}[^*/] ]] && [[ "$1" == *"$2"* ]]
+}
+
 if [[ -z "$SOURCE_FILE" || -z "$OUTPUT_FILE" ]]; then
     echo "Usage: $0 <source_file> <output_file>"
     exit 1
@@ -127,14 +151,6 @@ fi
 mapfile -t SOURCE_FILE_LINES < "$SOURCE_FILE"
 
 # Get starting index of the procedure division
-for i in "${!SOURCE_FILE_LINES[@]}"; do
-    if [[ "${SOURCE_FILE_LINES[$i]}" == *"PROCEDURE DIVISION"* ]]; then
-        PROCEDURE_DIVISION_INDEX=$i
-        break
-    fi
-done
-
-# Re-evaluating the loop to strictly match pseudocode logic for "PROCEDURE DIVISION"
 for i in "${!SOURCE_FILE_LINES[@]}"; do
     if [[ "${SOURCE_FILE_LINES[$i]}" == *"PROCEDURE DIVISION"* ]]; then
         PROCEDURE_DIVISION_INDEX=$i
@@ -160,14 +176,25 @@ COVERAGE_INDEX=0
 PROGRAM_NAME=$(sed -nE 's/^.{6}[^*]PROGRAM-ID\.[[:space:]]*(.*)\..*/\1/p' "$SOURCE_FILE" | head -n 1)
 
 # If no match is found, default to "UNKNOWN"
-if [[ -z "$PROGRAM_NAME" ]]; then PROGRAM_NAME="UNKNOWN"; fi 
+if [[ -z "$PROGRAM_NAME" ]]; then PROGRAM_NAME="UNKNOWN"; fi
+
+# Per-program names, so instrumenting several programs side by side never collides.
+PROGRAM_NAME_CLEAN="${PROGRAM_NAME//[^A-Za-z0-9]/}"
+# The combine program's input is the same name for every program: a valid
+# (8 characters or fewer) DD name in JCL, and on UNIX an environment variable
+# (COVIN=/path/to/file, or DD_COVIN) - set per run, so it never needs to differ
+# between programs.
+COVERAGE_FILE_NAME="COVIN"
+# The same for every program: 8 characters or fewer.
+COMBINE_PROGRAM_ID="COVCOMB"
+COMBINE_OUTPUT_FILE="$(dirname "$OUTPUT_FILE")/${PROGRAM_NAME_CLEAN}-combine.cbl"
 HEADER_1=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"')
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERAGE REPORT - $PROGRAM_NAME                                            \"" '"')
 HEADER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"') 
 DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
 
 # Define keywords that trigger a coverage check - expand as needed
-EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY|PERFORM|CALL|GOBACK|STRING|INSPECT|UNSTRING|ACCEPT|DIVIDE|MULTIPLY|SUBTRACT|SET|OPEN|CLOSE|CONTINUE)"
+EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY |PERFORM|CALL|GOBACK|STRING|INSPECT|UNSTRING|ACCEPT|DIVIDE|MULTIPLY|SUBTRACT|SET|OPEN|CLOSE|CONTINUE|WRITE|GO)"
 # Control statements that precede an exit or jump
 CONTROL_KEYWORDS="STOP[[:space:]]*RUN|GO[[:space:]]*BACK"
 
@@ -193,7 +220,7 @@ for (( i=$PROCEDURE_DIVISION_INDEX; i<${#SOURCE_FILE_LINES[@]}; i++ )); do
 
         # If this is a control verb then run the display coverage before, otherwise the code will exit before outputing the report
         if [[ "$LINE" =~ ($CONTROL_KEYWORDS) ]]; then
-            MODIFIED_PROCEDURE_DIVISION_LINES+="${AREA_B_INDENT}PERFORM DISPLAY-COVERAGE\n"                                                        
+            MODIFIED_PROCEDURE_DIVISION_LINES+="${AREA_B_INDENT}PERFORM DISPLAY-COVERAGE\n"
         fi
         # Add the original line back in
         MODIFIED_PROCEDURE_DIVISION_LINES+="$LINE\n"
@@ -215,6 +242,13 @@ done
 # At this point the DISPLAY COVERAGE section has displays for all permutations of the procedure division
 # At the end of the display coverage we need to display a summary
 
+# Fingerprint the coverage mapping. Raw coverage data is only meaningful against
+# the exact statement-to-flag mapping it was produced with. The report text so
+# far embeds the procedure division source and marks which lines carry a flag,
+# so its checksum changes whenever the source or the precompiler's choice of
+# instrumented lines changes - letting the combine program reject stale data.
+COVERAGE_FINGERPRINT=$(printf "%b" "$DISPLAY_COVERAGE_SECTION_LINES" | cksum | awk '{printf "%010d", $1}')
+
 # Calculate statistics
 DISPLAY_COVERAGE_SECTION_LINES+=${AREA_B_INDENT}"MOVE 0 TO COVERED-STMT\n"
 DISPLAY_COVERAGE_SECTION_LINES+=${AREA_B_INDENT}"PERFORM VARYING COV-FLAGS-COUNTER FROM 1 BY 1 \n"
@@ -234,7 +268,28 @@ DISPLAY_COVERAGE_SECTION_LINES+="$FOOTER_1$FOOTER_2$FOOTER_3\n"
 # Display calculated output
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    TOTAL STATEMENTS: \" TOTAL-STMT\n" '"')
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERED STATEMENTS: \", COVERED-STMT\n" '"')
-DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    STATEMENT COVERAGE: \", PERCENT-CALC \"%\"\n" '"')
+# Displayed through an edited field - PERCENT-CALC's V is an implied decimal
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} MOVE PERCENT-CALC TO PERCENT-DISPLAY\n"
+DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    STATEMENT COVERAGE: \", PERCENT-DISPLAY \"%\"\n" '"')
+
+# Raw coverage data, for the combine program to merge across runs. Each line
+# is self-contained: *COV* <fingerprint> <offset of first flag> <chunk of flags>
+# Chunks are sized so every line fits COVERAGE_OUTPUT_WIDTH, so the output is
+# never split, and the offset means lines can be merged in any order or
+# interleaved with other output. "*" is used as the marker because it is
+# invariant across EBCDIC code pages, unlike @ # $.
+# UNSTRING without DELIMITED BY takes exactly as many flags as the chunk holds
+# and advances the pointer by the number it actually took - so the logged
+# offset always matches the data, and the last chunk is simply space-padded.
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} MOVE 1 TO COV-RAW-POINTER\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} PERFORM UNTIL COV-RAW-POINTER > TOTAL-STMT\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}     MOVE COV-RAW-POINTER TO COV-RAW-OFFSET\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}     UNSTRING COV-FLAGS-OUTPUT INTO COV-RAW-CHUNK\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}         WITH POINTER COV-RAW-POINTER\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}     END-UNSTRING\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}     DISPLAY \"*COV* \" COV-FINGERPRINT \" \" COV-RAW-OFFSET \" \"\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}         COV-RAW-CHUNK\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} END-PERFORM\n"
 
 # Final closing of the section
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    END OF REPORT - $PROGRAM_NAME                                            \"" '"')
@@ -257,17 +312,72 @@ MODIFIED_PROCEDURE_DIVISION_LINES+="$DISPLAY_COVERAGE_SECTION_LINES"
 # ==============================================================================
 FINAL_OUTPUT=""
 
+# Size every statement-count field from the statement count itself, so none
+# can be too small to hold its values. COBOL never fails on an oversized value
+# - it silently keeps the low-order digits - so sizing is the only defence.
+# The widest value any of them holds is the *COV* pointer, which finishes one
+# past the last flag. The combine program splits *COV* lines on spaces rather
+# than reading fixed positions so it can still merge output from an earlier
+# precompiler version with the same mapping fingerprint, whose offset width may
+# differ - read at fixed positions, such a line could put its flags against the
+# wrong statements. (Lines from other programs are rejected on their
+# fingerprint, which is always the first field after the marker.)
+COVERAGE_MAX_COUNT=$((COVERAGE_INDEX + 1))
+COVERAGE_COUNT_DIGITS=${#COVERAGE_MAX_COUNT}
+
+# A *COV* line is: "*COV* " + 10 digit fingerprint + " " + offset + " " + chunk
+# The chunk takes whatever COVERAGE_OUTPUT_WIDTH leaves after the prefix
+COVERAGE_LINE_PREFIX_WIDTH=$((6 + 10 + 1 + COVERAGE_COUNT_DIGITS + 1))
+COVERAGE_CHUNK_SIZE=$((COVERAGE_OUTPUT_WIDTH - COVERAGE_LINE_PREFIX_WIDTH))
+if (( COVERAGE_CHUNK_SIZE < 1 )); then
+    echo "Error: COVERAGE_OUTPUT_WIDTH=$COVERAGE_OUTPUT_WIDTH leaves no room for coverage flags" \
+         "- a *COV* line for $COVERAGE_INDEX statements needs at least" \
+         "$((COVERAGE_LINE_PREFIX_WIDTH + 1)) columns" >&2
+    exit 1
+fi
+# No chunk needs to be bigger than the whole flag string - DISPLAY pads the
+# chunk field to its full size, so a wide setting would otherwise pad every line
+if (( COVERAGE_CHUNK_SIZE > COVERAGE_INDEX )); then
+    COVERAGE_CHUNK_SIZE=$COVERAGE_INDEX
+fi
+if (( COVERAGE_INPUT_WIDTH < COVERAGE_OUTPUT_WIDTH )); then
+    echo "Error: COVERAGE_INPUT_WIDTH=$COVERAGE_INPUT_WIDTH is narrower than" \
+         "COVERAGE_OUTPUT_WIDTH=$COVERAGE_OUTPUT_WIDTH - the combine program" \
+         "couldn't read its own program's output" >&2
+    exit 1
+fi
+
+# Positions within an input record (marker position, field lengths, flag
+# index) must hold up to one past the record width - sized from it for the
+# same reason as the statement counts above
+COMBINE_POSITION_MAX=$((COVERAGE_INPUT_WIDTH + 1))
+COMBINE_POSITION_DIGITS=${#COMBINE_POSITION_MAX}
+
+# Working storage needed by DISPLAY-COVERAGE - shared by the instrumented
+# program and the combine program, since both include that section
+COVERAGE_WORKING_STORAGE=""
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-FLAGS-TABLE.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}     05 COV-FLAGS OCCURS $COVERAGE_INDEX TIMES PIC 9(1) VALUE 0.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-FLAGS-ALL REDEFINES COV-FLAGS-TABLE.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}     05 COV-FLAGS-OUTPUT PIC X($COVERAGE_INDEX).\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-STATS.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 TOTAL-STMT       PIC 9(${COVERAGE_COUNT_DIGITS}) VALUE $COVERAGE_INDEX.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COVERED-STMT     PIC 9(${COVERAGE_COUNT_DIGITS}) VALUE 0.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 PERCENT-CALC     PIC 9(3)V99 VALUE 0.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 PERCENT-DISPLAY  PIC 999.99.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-FLAGS-COUNTER PIC 9(9) COMP VALUE 1.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT} 01 COV-RAW-DATA.\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-FINGERPRINT  PIC X(10) VALUE \"${COVERAGE_FINGERPRINT}\".\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-RAW-OFFSET   PIC 9(${COVERAGE_COUNT_DIGITS}).\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-RAW-POINTER  PIC 9(${COVERAGE_COUNT_DIGITS}).\n"
+COVERAGE_WORKING_STORAGE+="${AREA_A_INDENT}   05 COV-RAW-CHUNK    PIC X(${COVERAGE_CHUNK_SIZE}).\n"
+
 for (( i=0; i<$PROCEDURE_DIVISION_INDEX; i++ )); do
     LINE="${SOURCE_FILE_LINES[$i]}"
-    if [[ "$LINE" == *"WORKING-STORAGE SECTION."* ]]; then
-        # Replace the standard header with the one containing the dynamic count
+    if cobol_code_line_has "$LINE" "WORKING-STORAGE SECTION"; then
+        # Replace the standard header with one followed by the coverage fields
         FINAL_OUTPUT+="${AREA_A_INDENT}WORKING-STORAGE SECTION.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT} 01 COV-FLAGS OCCURS $COVERAGE_INDEX TIMES PIC 9(1) VALUE 0.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT} 01 COV-STATS.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT}   05 TOTAL-STMT       PIC 9(4) VALUE $COVERAGE_INDEX.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT}   05 COVERED-STMT     PIC 9(4) VALUE 0.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT}   05 PERCENT-CALC     PIC 9(3)V99 VALUE 0.\n"
-        FINAL_OUTPUT+="${AREA_A_INDENT}   05 COV-FLAGS-COUNTER PIC 9(9) COMP VALUE 1.\n"
+        FINAL_OUTPUT+="$COVERAGE_WORKING_STORAGE"
     else
         FINAL_OUTPUT+="$LINE\n"
     fi
@@ -279,4 +389,161 @@ FINAL_OUTPUT+="$MODIFIED_PROCEDURE_DIVISION_LINES"
 # Write the final result to the output file
 printf "%b" "$FINAL_OUTPUT" > "$OUTPUT_FILE"
 
+
+# ==============================================================================
+# Phase 4: Combine program
+# Build a bespoke program that reads captured output from any number of runs
+# (stdout, SYSOUT, pasted text - other lines are ignored), ORs together the
+# flags from every *COV* line (a statement counts as covered if any run
+# executed it) and prints the same report as the instrumented program.
+# Lines whose fingerprint doesn't match this mapping are counted and skipped.
+# ==============================================================================
+COMBINE_COVERAGE_LINES=""
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}IDENTIFICATION DIVISION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}PROGRAM-ID. ${COMBINE_PROGRAM_ID}.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}AUTHOR. CODE COVERAGE PRECOMPILER.\n"
+COMBINE_COVERAGE_LINES+="\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}ENVIRONMENT DIVISION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}INPUT-OUTPUT SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}FILE-CONTROL.\n"
+# Unquoted, so it is a DD name under IBM rules. Caution for GnuCOBOL: in its
+# default dialect an unquoted ASSIGN word becomes an implicit data item whose
+# descriptor is a reused temporary, so any statement that reuses it BEFORE the
+# OPEN changes the filename (seen as a file literally named "1"). The OPEN is
+# therefore the first statement of the program - KEEP THIS UNTIL THIS BUG IS FIXED IN GNUCOBOL.
+# (Compiling with -std=ibm or -fassign-clause=external avoids the implicit item entirely.)
+# However this breaks the BYO compiler rule
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}SELECT OPTIONAL COV-IN-FILE ASSIGN TO ${COVERAGE_FILE_NAME}\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}ORGANIZATION IS LINE SEQUENTIAL\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}FILE STATUS IS COV-IN-STATUS.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}DATA DIVISION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}FILE SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}FD COV-IN-FILE.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}01 COV-IN-REC PIC X(${COVERAGE_INPUT_WIDTH}).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}WORKING-STORAGE SECTION.\n"
+COMBINE_COVERAGE_LINES+="$COVERAGE_WORKING_STORAGE"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-STATUS PIC XX.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-POS PIC 9(${COMBINE_POSITION_DIGITS}) COMP.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-INDEX PIC 9(${COMBINE_POSITION_DIGITS}) COMP.\n"
+# The fields of a *COV* line, split on spaces rather than taken from fixed
+# positions - so the combine accepts any offset width or chunk size, including
+# output from earlier precompiler versions with the same mapping fingerprint
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-FIELDS.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}     05 COV-IN-MARKER PIC X(5).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}     05 COV-IN-FINGERPRINT PIC X(10).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}     05 COV-IN-OFFSET PIC X(9).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}     05 COV-IN-FLAGS PIC X(${COVERAGE_INPUT_WIDTH}).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-FINGERPRINT-LEN PIC 9(${COMBINE_POSITION_DIGITS}) COMP.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-OFFSET-LEN PIC 9(${COMBINE_POSITION_DIGITS}) COMP.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-IN-OFFSET-NUM PIC 9(9).\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-RUNS-MERGED PIC 9(9) VALUE 0.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-LINES-MERGED PIC 9(9) VALUE 0.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-LINES-SKIPPED PIC 9(9) VALUE 0.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 COV-LINES-TRUNCATED PIC 9(9) VALUE 0.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT} 01 END-OF-COVERAGE-FLAG PIC X VALUE 'N'.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}     88 END-OF-FILE VALUE 'Y'.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}PROCEDURE DIVISION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}READ-COVERAGE SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}OPEN INPUT COV-IN-FILE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}IF COV-IN-STATUS NOT = \"00\" AND COV-IN-STATUS NOT = \"05\"\n"
+COMBINE_COVERAGE_LINES+="$(cobol_wrap_display "${AREA_B_INDENT}    DISPLAY \"COVERAGE: UNABLE TO OPEN ${COVERAGE_FILE_NAME}\"" '"')\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        \" FILE STATUS \" COV-IN-STATUS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    MOVE 8 TO RETURN-CODE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    STOP RUN\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}PERFORM READ-LOOP UNTIL END-OF-FILE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}CLOSE COV-IN-FILE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}PERFORM DISPLAY-COVERAGE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"RUNS MERGED: \" COV-RUNS-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"COVERAGE LINES MERGED: \" COV-LINES-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"COVERAGE LINES SKIPPED \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    \"(OTHER PROGRAM, STALE OR MALFORMED): \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    COV-LINES-SKIPPED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}DISPLAY \"INPUT LINES POSSIBLY TRUNCATED: \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    COV-LINES-TRUNCATED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}IF COV-LINES-TRUNCATED > 0\n"
+COMBINE_COVERAGE_LINES+="$(cobol_wrap_display "${AREA_B_INDENT}    DISPLAY \"    (LINES FILLED ALL ${COVERAGE_INPUT_WIDTH} COLUMNS - RAISE COVERAGE_INPUT_WIDTH)\"" '"')\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}STOP RUN\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}.\n"
+COMBINE_COVERAGE_LINES+="\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}READ-LOOP SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}READ COV-IN-FILE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    AT END\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        SET END-OF-FILE TO TRUE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    NOT AT END\n"
+# A line longer than the record is silently cut off on read. A record whose
+# last byte isn't a space was filled, so the line may have been longer - any
+# flags it still has are correctly positioned, but some may be missing, or a
+# *COV* marker may have been cut off entirely. Counted all the same, so a
+# too-narrow COVERAGE_INPUT_WIDTH shows up in the report.
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        IF COV-IN-REC(LENGTH OF COV-IN-REC:1) NOT = SPACE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}            ADD 1 TO COV-LINES-TRUNCATED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        PERFORM PARSE-LINE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-READ\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}.\n"
+COMBINE_COVERAGE_LINES+="\n"
+# Find the marker anywhere in the line - captured output may carry a prefix.
+# A tally equal to the record length means the marker isn't on this line.
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}PARSE-LINE SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}MOVE 0 TO COV-IN-POS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}INSPECT COV-IN-REC TALLYING COV-IN-POS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    FOR CHARACTERS BEFORE INITIAL \"*COV* \"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}IF COV-IN-POS < LENGTH OF COV-IN-REC\n"
+# UNSTRING leaves a receiving field untouched when no data reaches it, so the
+# fields are cleared first - otherwise a truncated line would inherit the
+# previous line's fingerprint and offset. The offset is only valid if it is
+# 1 to 9 digits; the length is checked in its own IF because COBOL doesn't
+# guarantee AND stops early, and a zero-length reference modification is invalid.
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    INITIALIZE COV-IN-FIELDS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    MOVE 0 TO COV-IN-FINGERPRINT-LEN COV-IN-OFFSET-LEN\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        COV-IN-OFFSET-NUM\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    UNSTRING COV-IN-REC(COV-IN-POS + 1:)\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        DELIMITED BY ALL SPACE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        INTO COV-IN-MARKER\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}             COV-IN-FINGERPRINT\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}                 COUNT IN COV-IN-FINGERPRINT-LEN\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}             COV-IN-OFFSET\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}                 COUNT IN COV-IN-OFFSET-LEN\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}             COV-IN-FLAGS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    END-UNSTRING\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    IF COV-IN-FINGERPRINT-LEN = 10\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    AND COV-IN-FINGERPRINT = COV-FINGERPRINT\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    AND COV-IN-OFFSET-LEN > 0\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    AND COV-IN-OFFSET-LEN NOT > LENGTH OF COV-IN-OFFSET\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        IF COV-IN-OFFSET(1:COV-IN-OFFSET-LEN) IS NUMERIC\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}            MOVE COV-IN-OFFSET(1:COV-IN-OFFSET-LEN)\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}                TO COV-IN-OFFSET-NUM\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    IF COV-IN-OFFSET-NUM > 0\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    AND COV-IN-OFFSET-NUM NOT > TOTAL-STMT\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        ADD 1 TO COV-LINES-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        IF COV-IN-OFFSET-NUM = 1\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}            ADD 1 TO COV-RUNS-MERGED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        PERFORM OR-FLAGS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    ELSE\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        ADD 1 TO COV-LINES-SKIPPED\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}.\n"
+COMBINE_COVERAGE_LINES+="\n"
+COMBINE_COVERAGE_LINES+="${AREA_A_INDENT}OR-FLAGS SECTION.\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}MOVE COV-IN-OFFSET-NUM TO COV-FLAGS-COUNTER\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}PERFORM VARYING COV-IN-INDEX FROM 1 BY 1\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}UNTIL COV-IN-INDEX > LENGTH OF COV-IN-FLAGS\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}OR COV-FLAGS-COUNTER > TOTAL-STMT\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    IF COV-IN-FLAGS(COV-IN-INDEX:1) = \"1\"\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}        MOVE \"1\" TO COV-FLAGS(COV-FLAGS-COUNTER)\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    END-IF\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}    ADD 1 TO COV-FLAGS-COUNTER\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}END-PERFORM\n"
+COMBINE_COVERAGE_LINES+="${AREA_B_INDENT}.\n"
+COMBINE_COVERAGE_LINES+="$DISPLAY_COVERAGE_SECTION_LINES"
+
+printf "%b" "$COMBINE_COVERAGE_LINES" > "$COMBINE_OUTPUT_FILE"
+
 echo "Pre-compilation complete. Output written to $OUTPUT_FILE"
+echo "Combine program written to $COMBINE_OUTPUT_FILE (reads captured output from ${COVERAGE_FILE_NAME})"
