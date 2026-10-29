@@ -10,12 +10,12 @@ Free and open source COBOL Code Coverage library
 ## How to use
 
 ``` bash
-./code-coverage-precompiler.sh <source file> <output file>
+./code-coverage-precompiler.sh <source file> <output file> [<combine output file>]
 ```
 
 The script reads the source file and builds the output file as a mirror with code coverage logic instrumented, which can be then passed onto a compiler of your choosing, I have been using GNU COBOL to test.
 
-It also writes a second program next to the output file, `<PROGRAM-ID>-combine.cbl`, which merges the coverage of many runs into one report - see [Combining Coverage Across Runs](#combining-coverage-across-runs).
+It also writes a second program which merges the coverage of many runs into one report - see [Combining Coverage Across Runs](#combining-coverage-across-runs). It's written to the combine output file if given, otherwise next to the output file as `<PROGRAM-ID>-combine.cbl`.
 
 ## Example
 

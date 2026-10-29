@@ -15,10 +15,12 @@
 
 # ==============================================================================
 # Phase 1: Initialization & function definition
-# Get source and output file paths from CLI arguments.
+# Get source and output file paths from CLI arguments. The combine program's
+# path is optional - see COMBINE_OUTPUT_FILE for its default.
 # ==============================================================================
 SOURCE_FILE=$1
 OUTPUT_FILE=$2
+COMBINE_OUTPUT_FILE=$3
 
 AREA_A_INDENT="       "
 AREA_B_INDENT="            "
@@ -144,7 +146,7 @@ cobol_code_line_has() {
 }
 
 if [[ -z "$SOURCE_FILE" || -z "$OUTPUT_FILE" ]]; then
-    echo "Usage: $0 <source_file> <output_file>"
+    echo "Usage: $0 <source_file> <output_file> [<combine_output_file>]"
     exit 1
 fi
 
@@ -188,14 +190,15 @@ PROGRAM_NAME_CLEAN="${PROGRAM_NAME//[^A-Za-z0-9]/}"
 COVERAGE_FILE_NAME="COVIN"
 # The same for every program: 8 characters or fewer.
 COMBINE_PROGRAM_ID="COVCOMB"
-COMBINE_OUTPUT_FILE="$(dirname "$OUTPUT_FILE")/${PROGRAM_NAME_CLEAN}-combine.cbl"
+# Unless the caller gave a path, next to the instrumented program
+COMBINE_OUTPUT_FILE="${COMBINE_OUTPUT_FILE:-$(dirname "$OUTPUT_FILE")/${PROGRAM_NAME_CLEAN}-combine.cbl}"
 HEADER_1=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"')
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERAGE REPORT - $PROGRAM_NAME                                            \"" '"')
 HEADER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"') 
 DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
 
 # Define keywords that trigger a coverage check - expand as needed
-EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE*|ADD*|COMPUTE*|DISPLAY*|PERFORM*|CALL*|GOBACK*|STRING*|INSPECT*|UNSTRING*|ACCEPT*|DIVIDE*|MULTIPLY*|SUBTRACT*|SET*|OPEN*|CLOSE*|CONTINUE*|WRITE*|GO*)"
+EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY |PERFORM |CALL |GOBACK |STRING |INSPECT |UNSTRING |ACCEPT |DIVIDE |MULTIPLY |SUBTRACT |SET |OPEN |CLOSE |CONTINUE |WRITE |GO )"
 # Control statements that precede an exit or jump
 CONTROL_KEYWORDS="STOP[[:space:]]*RUN|GO[[:space:]]*BACK"
 
