@@ -161,6 +161,14 @@ for i in "${!SOURCE_FILE_LINES[@]}"; do
     fi
 done
 
+# The closing END PROGRAM / END FUNCTION line, if present, must remain the
+# last line of the output. Track the LAST occurrence so the injected
+# DISPLAY-COVERAGE section isn't pushed outside the program boundary.
+END_PROG_INDEX=""
+for i in "${!SOURCE_FILE_LINES[@]}"; do
+    [[ "${SOURCE_FILE_LINES[$i]^^}" =~ END[-[:space:]](PROGRAM|FUNCTION).*\. ]] && END_PROG_INDEX=$i
+done
+
 # ==============================================================================
 # Phase 2: Analysis & Transformation
 # Process the Procedure Division to inject coverage logic and build the
@@ -192,17 +200,24 @@ COVERAGE_FILE_NAME="COVIN"
 COMBINE_PROGRAM_ID="COVCOMB"
 # Unless the caller gave a path, next to the instrumented program
 COMBINE_OUTPUT_FILE="${COMBINE_OUTPUT_FILE:-$(dirname "$OUTPUT_FILE")/${PROGRAM_NAME_CLEAN}-combine.cbl}"
-HEADER_1=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"')
+BANNER_LINE=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"')
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    COVERAGE REPORT - $PROGRAM_NAME                                            \"" '"')
-HEADER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"****************************************************************************************\"" '"') 
-DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
+DISPLAY_COVERAGE_SECTION_LINES+="${BANNER_LINE}\n${HEADER_2}\n${BANNER_LINE}\n"
 
 # Define keywords that trigger a coverage check - expand as needed
 EXECUTABLE_KEYWORDS="^.{6}[^*][ ]{3}[ ]*(MOVE|ADD|COMPUTE|DISPLAY |PERFORM |CALL |GOBACK |STRING |INSPECT |UNSTRING |ACCEPT |DIVIDE |MULTIPLY |SUBTRACT |SET |OPEN |CLOSE |CONTINUE |WRITE |GO )"
 # Control statements that precede an exit or jump
 CONTROL_KEYWORDS="STOP[[:space:]]*RUN|GO[[:space:]]*BACK"
 
-for (( i=$PROCEDURE_DIVISION_INDEX; i<${#SOURCE_FILE_LINES[@]}; i++ )); do
+# Determine where to stop: just before the closing END-PROGRAM / END-FUNCTION
+# if one was found, otherwise at the end of all source lines.
+if [[ -n "$END_PROG_INDEX" ]]; then
+    COVERAGE_LOOP_END=$END_PROG_INDEX
+else
+    COVERAGE_LOOP_END=${#SOURCE_FILE_LINES[@]}
+fi
+
+for (( i=$PROCEDURE_DIVISION_INDEX; i<${COVERAGE_LOOP_END}; i++ )); do
     LINE="${SOURCE_FILE_LINES[$i]}"
     # Determine the appropriate quote character based on the original line content.
     # If the line contains double quotes, use single quotes for wrapping to avoid conflicts.
@@ -264,10 +279,8 @@ DISPLAY_COVERAGE_SECTION_LINES+=${AREA_B_INDENT}"COMPUTE PERCENT-CALC = \n"
 DISPLAY_COVERAGE_SECTION_LINES+=${AREA_B_INDENT}"(COVERED-STMT / TOTAL-STMT) * 100\n"
 
 # Final Summary Box
-FOOTER_1=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY '****************************************************************************************'\n" "'")
 FOOTER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    SUMMARY STATISTICS                           \"\n" '"')
-FOOTER_3=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY '****************************************************************************************'\n" "'")
-DISPLAY_COVERAGE_SECTION_LINES+="$FOOTER_1$FOOTER_2$FOOTER_3\n"
+DISPLAY_COVERAGE_SECTION_LINES+="${BANNER_LINE}\n${FOOTER_2}\n${BANNER_LINE}\n"
 
 # Display calculated output
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    TOTAL STATEMENTS: \" TOTAL-STMT\n" '"')
@@ -285,6 +298,8 @@ DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \
 # UNSTRING without DELIMITED BY takes exactly as many flags as the chunk holds
 # and advances the pointer by the number it actually took - so the logged
 # offset always matches the data, and the last chunk is simply space-padded.
+RCOV_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    RAW COVERAGE DATA                                   \"\n" '"')
+DISPLAY_COVERAGE_SECTION_LINES+="${BANNER_LINE}\n${RCOV_2}\n${BANNER_LINE}\n"
 DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} MOVE 1 TO COV-RAW-POINTER\n"
 DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} PERFORM UNTIL COV-RAW-POINTER > TOTAL-STMT\n"
 DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT}     MOVE COV-RAW-POINTER TO COV-RAW-OFFSET\n"
@@ -297,7 +312,7 @@ DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} END-PERFORM\n"
 
 # Final closing of the section
 HEADER_2=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \"    END OF REPORT - $PROGRAM_NAME                                            \"" '"')
-DISPLAY_COVERAGE_SECTION_LINES+="$HEADER_1\n$HEADER_2\n$HEADER_3\n" 
+DISPLAY_COVERAGE_SECTION_LINES+="${BANNER_LINE}\n${HEADER_2}\n${BANNER_LINE}\n" 
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \" \"\n" '"')
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \" \"\n" '"')
 DISPLAY_COVERAGE_SECTION_LINES+=$(cobol_wrap_display "${AREA_B_INDENT} DISPLAY \" \"\n" '"')
@@ -308,6 +323,12 @@ DISPLAY_COVERAGE_SECTION_LINES+="${AREA_B_INDENT} .\n"
 
 # Append the report section to the end of the modified procedure division
 MODIFIED_PROCEDURE_DIVISION_LINES+="$DISPLAY_COVERAGE_SECTION_LINES"
+
+# Restore the original closing END-PROGRAM / END-FUNCTION line as the last
+# line of output so the DISPLAY-COVERAGE section stays inside the body.
+if [[ -n "$END_PROG_INDEX" ]]; then
+    MODIFIED_PROCEDURE_DIVISION_LINES+="${SOURCE_FILE_LINES[$END_PROG_INDEX]}"
+fi
 
 # ==============================================================================
 # Phase 3: Working Storage Update & Final Assembly
